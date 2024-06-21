@@ -1,213 +1,253 @@
+import os
+import time
+import hashlib
+import requests
+import threading
+from flask import Flask, jsonify
 from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import WebDriverException, NoSuchDriverException
 from selenium.webdriver.chrome.service import Service as ChromeService
 
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
-
-from selenium.common.exceptions import WebDriverException, NoSuchDriverException
-
-import time
-import requests
-import os
-import re
-import base64
-from flask import Flask
-import hashlib
-import sys
-
-extensionId = 'ilehaonighjijnmpnagapkhpcdbhclfg'
+# Constants
+EXTENSION_ID = 'lkbnfiajjmbhnfledhphioinpickokdi'
 CRX_URL = "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=98.0.4758.102&acceptformat=crx2,crx3&x=id%3D~~~~%26uc&nacl_arch=x86-64"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"
+IMGUR_CLIENT_ID = os.getenv('IMGUR_CLIENT_ID', '')
 
-try:
-    USER = os.environ['GRASS_USER']
-    PASSW = os.environ['GRASS_PASS']
-except:
-    USER = ''
-    PASSW = ''
+# Environment variables
+USER = os.getenv('GRASS_USER', '')
+PASSW = os.getenv('GRASS_PASS', '')
+ALLOW_DEBUG = os.getenv('ALLOW_DEBUG', 'False').lower() == 'true'
 
-try:
-    ALLOW_DEBUG = os.environ['ALLOW_DEBUG']
-    if ALLOW_DEBUG == 'True':
-        ALLOW_DEBUG = True
-    else:
-        ALLOW_DEBUG = False
-except:
-    ALLOW_DEBUG = False
+# Check if necessary environment variables are set
+def check_env_variables():
+    if not USER or not PASSW:
+        print('Please set GRASS_USER and GRASS_PASS env variables')
+        exit()
 
-# are they set?
-if USER == '' or PASSW == '':
-    print('Please set GRASS_USER and GRASS_PASS env variables')
-    exit()
+    if ALLOW_DEBUG:
+        print('Debugging is enabled! This will generate a screenshot and console logs on error!')
+        if not IMGUR_CLIENT_ID:
+            raise EnvironmentError(
+                'Please set IMGUR_CLIENT_ID env variables')
 
-if ALLOW_DEBUG == True:
-    print('Debugging is enabled! This will generate a screenshot and console logs on error!')
+# Function to generate error report
+def generate_error_report(driver):
+    if not ALLOW_DEBUG:
+        return
 
+    try:
+        # Take a screenshot
+        screenshot_path = 'error.png'
+        driver.save_screenshot(screenshot_path)
 
-#https://gist.github.com/ckuethe/fb6d972ecfc590c2f9b8
+        # Get console logs
+        logs = driver.get_log('browser')
+        log_path = 'error.log'
+        with open(log_path, 'w') as f:
+            for log in logs:
+                f.write(str(log))
+                f.write('\n')
+
+        # Upload the screenshot to Imgur
+        url = 'https://api.imgur.com/3/upload'
+        headers = {'Authorization': f'Client-ID {IMGUR_CLIENT_ID}'}
+        with open(screenshot_path, 'rb') as image_file:
+            files = {'image': image_file}
+            response = requests.post(url, headers=headers, files=files)
+
+        if response.status_code == 200:
+            data = response.json()
+            image_url = data['data']['link']
+            print('Screenshot uploaded successfully.')
+            print('Image URL:', image_url)
+        else:
+            print(f'Failed to upload screenshot. Status code: {response.status_code}')
+            print('Response:', response.text)
+
+        print('Error report generated! Provide the above information to the developer for debugging purposes.')
+
+    except Exception as e:
+        print(f'An error occurred while generating the error report: {str(e)}')
+
+# Function to download extension
 def download_extension(extension_id):
     url = CRX_URL.replace("~~~~", extension_id)
     headers = {"User-Agent": USER_AGENT}
-    r = requests.get(url, stream=True, headers=headers)
+    response = requests.get(url, stream=True, headers=headers)
     with open("grass.crx", "wb") as fd:
-        for chunk in r.iter_content(chunk_size=128):
+        for chunk in response.iter_content(chunk_size=128):
             fd.write(chunk)
-    if ALLOW_DEBUG == True:
-        #generate md5 of file
+    if ALLOW_DEBUG:
         md5 = hashlib.md5(open('grass.crx', 'rb').read()).hexdigest()
-        print('Extension MD5: ' + md5)
+        print(f'Extension MD5: {md5}')
 
+def reconnect_extension(driver):
+        try:
+            webdriver(driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, '//p[contains(text(), "Reconnect"]'))
+            )
+            print('Found the "Reconnect" link!')
+            driver.find_element(By.XPATH, '//p[contains(text(), "Reconnect"]').click()
+        except Exception as e:
+            # No need to reconnect extension, continue
+            return
 
-
-def generate_error_report(driver):
-    if ALLOW_DEBUG == False:
-        return
-    #grab screenshot
-    driver.save_screenshot('error.png')
-    #grab console logs
-    logs = driver.get_log('browser')
-    with open('error.log', 'w') as f:
-        for log in logs:
-            f.write(str(log))
-            f.write('\n')
-
-    url = 'https://imagebin.ca/upload.php'
-    files = {'file': ('error.png', open('error.png', 'rb'), 'image/png')}
-    response = requests.post(url, files=files)
-    print(response.text)
-    print('Error report generated! Provide the above information to the developer for debugging purposes.')
-
-print('Downloading extension...')
-download_extension(extensionId)
-print('Downloaded! Installing extension and driver manager...')
-
-options = webdriver.ChromeOptions()
-#options.binary_location = '/usr/bin/chromium-browser'
-options.add_argument("--headless=new")
-options.add_argument("--disable-dev-shm-usage")
-options.add_argument('--no-sandbox')
-
-options.add_extension('grass.crx')
-
-print('Installed! Starting...')
-try:
-    driver = webdriver.Chrome(options=options)
-except (WebDriverException, NoSuchDriverException) as e:
-    print('Could not start with Manager! Trying to default to manual path...')
+# Function to refresh the page periodically
+def refresh_task(driver):
+    print("Refresh task started....")
     try:
-        driver_path = "/usr/bin/chromedriver"
-        service = ChromeService(executable_path=driver_path)
-        driver = webdriver.Chrome(service=service, options=options)
-    except (WebDriverException, NoSuchDriverException) as e:
-        print('Could not start with manual path! Exiting...')
-        exit()
+        while True:
+            data = get_data(driver)
+            print(data)
+            driver.refresh()
+            time.sleep(60)
+    except KeyboardInterrupt:
+        print("Selenium task stopped by user")
+    finally:
+        driver.quit()
 
-#driver.get('chrome-extension://'+extensionId+'/index.html')
-print('Started! Logging in...')
-driver.get('https://app.getgrass.io/')
-
-sleep = 0
-while True:
+# Function to retrieve data from the dashboard
+def get_data(driver):
     try:
-        driver.find_element('xpath', '//*[@name="user"]')
-        driver.find_element('xpath', '//*[@name="password"]')
-        driver.find_element('xpath', '//*[@type="submit"]')
-        break
-    except:
-        time.sleep(1)
-        print('Loading login form...')
-        sleep += 1
-        if sleep > 15:
-            print('Could not load login form! Exiting...')
-            generate_error_report(driver)
-            driver.quit()
-            exit()
-
-#find name="user"
-user = driver.find_element('xpath', '//*[@name="user"]')
-passw = driver.find_element('xpath', '//*[@name="password"]')
-submit = driver.find_element('xpath', '//*[@type="submit"]')
-
-#get user from env
-user.send_keys(USER)
-passw.send_keys(PASSW)
-submit.click()
-
-#id="chakra-toast-manager-top-right" is the toast
-
-
-sleep = 0
-while True:
-    try:
-        e = driver.find_element('xpath', '//*[contains(text(), "Dashboard")]')
-        break
-    except:
-        time.sleep(1)
-        print('Logging in...')
-        sleep += 1
-        if sleep > 30:
-            print('Could not login! Double Check your username and password! Exiting...')
-            generate_error_report(driver)
-            driver.quit()
-            exit()
-
-print('Logged in! Waiting for connection...')
-driver.get('chrome-extension://'+extensionId+'/index.html')
-sleep = 0
-while True:
-    try:
-        driver.find_element('xpath', '//*[contains(text(), "Open dashboard")]')
-        break
-    except:
-        time.sleep(1)
-        print('Loading connection...')
-        sleep += 1
-        if sleep > 30:
-            print('Could not load connection! Exiting...')
-            generate_error_report(driver)
-            driver.quit()
-            exit()
-
-print('Connected! Starting API...')
-#flask api
-app = Flask(__name__)
-
-@app.route('/')
-def get():
-    try:
-        network_quality = driver.find_element('xpath', '//*[contains(text(), "Network quality")]').text
-        network_quality = re.findall(r'\d+', network_quality)[0]
+        network_quality = driver.find_element('xpath', '//*[contains(text(), "Network Quality:")]').find_element('xpath', 'following-sibling::p').text
     except:
         network_quality = False
-        print('Could not get network quality!')
         generate_error_report(driver)
+        print('Could not get network quality!')
 
     try:
-        token = driver.find_element('xpath', '//*[@alt="token"]')
-        token = token.find_element('xpath', 'following-sibling::div')
-        epoch_earnings = token.text
-    except Exception as e:
+        token = driver.find_element('xpath', '//*[@alt="token"]').find_element('xpath', 'following-sibling::div').text
+        epoch_earnings = token
+    except:
         epoch_earnings = False
-        print('Could not get earnings!')
         generate_error_report(driver)
-    
+        print('Could not get earnings!')
+
     try:
-        #find all chakra-badge
-        badges = driver.find_elements('xpath', '//*[contains(@class, "chakra-badge")]')
-        #find the one with chakra-text that contains either "Connected" or "Disconnected"
-        connected = False
-        for badge in badges:
-            text = badge.find_element('xpath', 'child::div//p').text
-            if 'Connected' in text:
-                connected = True
-                break
+        driver.find_element('xpath', '//*[contains(text(), "Grass is Connected")]')
+        connected = True
     except:
         connected = False
-        print('Could not get connection status!')
         generate_error_report(driver)
+        print('Could not get connection status!')
 
     return {'connected': connected, 'network_quality': network_quality, 'epoch_earnings': epoch_earnings}
 
+# Function to initialize and configure the WebDriver
+def initialize_driver():
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument('--no-sandbox')
+    options.add_extension('grass.crx')
 
-app.run(host='0.0.0.0',port=80, debug=False)
-driver.quit()
+    print('Installed! Starting...')
+    try:
+        driver = webdriver.Chrome(options=options)
+    except (WebDriverException, NoSuchDriverException):
+        print('Could not start with Manager! Trying to default to manual path...')
+        try:
+            service = ChromeService(executable_path="/usr/bin/chromedriver")
+            driver = webdriver.Chrome(service=service, options=options)
+        except (WebDriverException, NoSuchDriverException):
+            print('Could not start with manual path! Exiting...')
+            exit()
+    return driver
+
+# Function to login to the dashboard
+def login(driver):
+    print('Started! Logging in...')
+    driver.get('https://app.getgrass.io/')
+    sleep = 0
+    while True:
+        try:
+            driver.find_element('xpath', '//*[@name="user"]')
+            driver.find_element('xpath', '//*[@name="password"]')
+            driver.find_element('xpath', '//*[@type="submit"]')
+            break
+        except:
+            time.sleep(1)
+            print('Loading login form...')
+            sleep += 1
+            if sleep > 15:
+                print('Could not load login form! Exiting...')
+                generate_error_report(driver)
+                driver.quit()
+                exit()
+
+    # Fill in username and password
+    driver.find_element('xpath', '//*[@name="user"]').send_keys(USER)
+    driver.find_element('xpath', '//*[@name="password"]').send_keys(PASSW)
+    driver.find_element('xpath', '//*[@type="submit"]').click()
+
+    sleep = 0
+    while True:
+        try:
+            driver.find_element('xpath', '//*[contains(text(), "Dashboard")]')
+            break
+        except:
+            time.sleep(1)
+            print('Logging in...')
+            sleep += 1
+            if sleep > 30:
+                print('Could not login! Double-check your username and password! Exiting...')
+                generate_error_report(driver)
+                driver.quit()
+                exit()
+
+# Function to wait for the connection
+def wait_for_connection(driver):
+    print('Logged in! Waiting for connection...')
+    driver.get(f'chrome-extension://{EXTENSION_ID}/index.html')
+    sleep = 0
+    while True:
+        try:
+            driver.find_element('xpath', '//*[contains(text(), "Grass is Connected")]')
+            break
+        except:
+            time.sleep(1)
+            print('Loading connection...')
+            sleep += 1
+            if sleep > 30:
+                print('Could not load connection! Exiting...')
+                generate_error_report(driver)
+                driver.quit()
+                exit()
+
+# Function to set up and run the Flask API
+def start_flask_api(driver):
+    app = Flask(__name__)
+
+    @app.route('/')
+    def get():
+        try:
+            data = get_data(driver)
+            for key in data:
+                if data[key] is None:
+                    data[key] = False
+            return jsonify(data)
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    selenium_thread = threading.Thread(target=refresh_task, args=(driver,))
+    selenium_thread.start()
+    app.run(host='0.0.0.0', port=80, debug=False)
+
+# Main function
+def main():
+    check_env_variables()
+    # Uncomment if the extension needs to be downloaded
+    # download_extension(EXTENSION_ID)
+    driver = initialize_driver()
+    login(driver)
+    wait_for_connection(driver)
+    print('Connected! Starting API...')
+    start_flask_api(driver)
+    driver.quit()
+
+if __name__ == '__main__':
+    main()
